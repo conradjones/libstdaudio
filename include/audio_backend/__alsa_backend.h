@@ -40,6 +40,23 @@ struct __snd_pcm_info_free {
 
 using __snd_pcm_info_t_raai = unique_ptr<snd_pcm_info_t, __snd_pcm_info_free>;
 
+struct __snd_pcm_hw_params_free {
+  void operator()(snd_pcm_hw_params_t* ptr) {
+    snd_pcm_hw_params_free(ptr);
+  }
+};
+
+using __snd_pcm_hw_params_raai = unique_ptr<snd_pcm_hw_params_t, __snd_pcm_hw_params_free>;
+
+struct __snd_pcm_t_free {
+  void operator()(snd_pcm_t* pcmInfo) {
+    snd_pcm_close(pcmInfo);
+  }
+};
+
+using __snd_pcm_t_raai = unique_ptr<snd_pcm_t, __snd_pcm_t_free>;
+
+
 // -----------------------------------------------------------------------------
 
 
@@ -51,42 +68,29 @@ struct __alsa_stream_config {
 //  AudioBufferList output_config = {0};
 };
 
-/*
-class __coreaudio_util {
+
+class __alsa_util {
 public:
-  static bool check_error(OSStatus error) {
-    if (error == noErr)
+  static bool check_error(int error) {
+    if (error == 0)
       return true;
 
     _log_message(_format_error(error));
+    assert(false);
     return false;
   }
 
 private:
-  static string _format_error(OSStatus error)
-  {
-    char c[4];
-    *(uint32_t *)(c) = CFSwapInt32HostToBig(uint32_t(error));
-    if (_is_four_character_code(c))
-      return string{"\'"} + c + "\'";
-
-    return to_string(error);
-  }
-
-  static bool _is_four_character_code(char* c) {
-    for (int i : {0, 1, 2, 3})
-      if (!isprint(c[i]))
-        return false;
-
-    return true;
+  static string _format_error(int error) {
+    return snd_strerror(error);
   }
 
   static void _log_message(const string& s) {
     // TODO: only do this in DEBUG
-    cerr << "__coreaudio_backend error: " << s << endl;
+    cerr << "__alsa_backend error: " << s << endl;
   }
 };
-*/
+
 struct audio_device_exception : public runtime_error {
   explicit audio_device_exception(const char* what)
     : runtime_error(what) {
@@ -98,11 +102,11 @@ struct __alsa_audio_device_id
   int card_id {-1};
   int device_id {-1};
 
-  string get_card_str_id() {
+  string get_card_str_id() const {
     return string("hw:") + to_string(card_id);
   }
 
-  __snd_ctl_card_info_raai get_card_info() {
+  __snd_ctl_card_info_raai get_card_info() const {
     __snd_ctl_t_raai snd_ctl_handle = card_handle();
     snd_ctl_card_info_t* card_info_raw = {nullptr};
 
@@ -110,7 +114,7 @@ struct __alsa_audio_device_id
     return __snd_ctl_card_info_raai(card_info_raw);
   }
 
-  __snd_pcm_info_t_raai get_pcm_info() {
+  __snd_pcm_info_t_raai get_pcm_info() const {
     snd_pcm_info_t* pcm_info_raw = {nullptr};
     snd_pcm_info_malloc(&pcm_info_raw);
 
@@ -122,7 +126,7 @@ struct __alsa_audio_device_id
     return __snd_pcm_info_t_raai(pcm_info_raw);
   }
 
-  string get_card_name(__snd_ctl_t_raai& snd_ctl_handle) {
+  string get_card_name(__snd_ctl_t_raai& snd_ctl_handle) const {
     __snd_ctl_card_info_raai card_info = get_card_info();
     if (!card_info)
       return string();
@@ -135,7 +139,11 @@ struct __alsa_audio_device_id
     return card_name;
   }
 
-  string get_device_name() {
+  string get_device_id_str() const {
+    return get_card_str_id() + ',' + to_string(device_id);
+  }
+
+  string get_device_name() const {
     __snd_ctl_t_raai snd_ctl_handle = card_handle();
 
     __snd_pcm_info_t_raai pcm_info = get_pcm_info();
@@ -152,7 +160,19 @@ struct __alsa_audio_device_id
     return card_name + " " + pcm_name;
   }
 
-  __snd_ctl_t_raai card_handle() {
+  __snd_pcm_t_raai get_pcm() const {
+    snd_pcm_t* pcm_t_raw {};
+    int result = snd_pcm_open(&pcm_t_raw, get_device_id_str().c_str(), SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK | SND_PCM_NO_AUTO_RESAMPLE | SND_PCM_NO_AUTO_CHANNELS | SND_PCM_NO_AUTO_FORMAT);
+    return __snd_pcm_t_raai(pcm_t_raw);
+  }
+
+  __snd_pcm_hw_params_raai get_hw_params() const {
+    snd_pcm_hw_params_t* hw_params_raw {};
+    snd_pcm_hw_params_malloc(&hw_params_raw);
+    return __snd_pcm_hw_params_raai(hw_params_raw);
+  }
+
+  __snd_ctl_t_raai card_handle() const {
     snd_ctl_t *raw_handle;
     int result = snd_ctl_open(&raw_handle, get_card_str_id().c_str(), 0);
     if (result < 0)
@@ -177,11 +197,11 @@ public:
   }
 
   using device_id_t = __alsa_audio_device_id;
-/*
+
   device_id_t device_id() const noexcept {
     return _device_id;
   }
-
+/*
   bool is_input() const noexcept {
     return _config.input_config.mNumberBuffers == 1;
   }*/
@@ -236,31 +256,26 @@ public:
   }
 */
   using buffer_size_t = uint32_t;
-/*
+
   buffer_size_t get_buffer_size_frames() const noexcept {
-    AudioObjectPropertyAddress pa = {
-      kAudioDevicePropertyBufferFrameSize,
-      kAudioObjectPropertyScopeGlobal,
-      kAudioObjectPropertyElementMaster
-    };
 
-    uint32_t data_size = 0;
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyDataSize(
-      _device_id, &pa, 0, nullptr, &data_size)))
+    __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
+    __snd_pcm_t_raai pcm = _device_id.get_pcm();
+
+    if (!__alsa_util::check_error(snd_pcm_hw_params_any(pcm.get(), hw_params.get())))
       return {};
 
-    if (data_size != sizeof(buffer_size_t))
+    if (!__alsa_util::check_error(snd_pcm_hw_params (pcm.get(), hw_params.get())))
       return {};
 
-    uint32_t buffer_size_frames = 0;
+    snd_pcm_uframes_t frames {};
 
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyData(
-      _device_id, &pa, 0, nullptr, &data_size, &buffer_size_frames)))
+    if (!__alsa_util::check_error(snd_pcm_hw_params_get_buffer_size(hw_params.get(), &frames)))
       return {};
 
-    return buffer_size_frames;
+    return frames;
   }
-*//*
+/*
   bool set_buffer_size_frames(buffer_size_t new_buffer_size) {
     // TODO: for some reason, the call below succeeds even for nonsensical buffer sizes, so we need to catch this  manually:
     if (new_buffer_size < _min_supported_buffer_size || new_buffer_size > _max_supported_buffer_size)
