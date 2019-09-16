@@ -24,6 +24,8 @@ using span = TCB_SPAN_NAMESPACE_NAME::span<ElementType, Extent>;
   #include <audio_backend/__coreaudio_backend.h>
 #elif defined(_WIN32)
   #include <audio_backend/__wasapi_backend.h>
+#elif defined(__linux__)
+  #include <audio_backend/__alsa_backend.h>
 #else
   #include <audio_backend/__null_backend.h>
 #endif // __APPLE__

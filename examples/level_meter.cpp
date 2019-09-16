@@ -20,7 +20,7 @@ int main() {
   using namespace std::experimental;
   std::atomic<float> max_abs_value = 0;
 
-  auto device = get_default_audio_input_device();
+/*  auto device = get_default_audio_input_device();
   if (!device)
     return 1;
 
@@ -39,10 +39,10 @@ int main() {
       }
     }
   });
-
-  device->start();
-  while(device->is_running()) {
+*/
+//  device->start();
+ /* while(device->is_running()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     std::cout << gain_to_db(max_abs_value.exchange(0)) << " dB\n";
-  }
+  }*/
 }
