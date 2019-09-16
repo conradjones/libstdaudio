@@ -218,32 +218,30 @@ public:
     return is_output() ? _config.output_config.mBuffers[0].mNumberChannels : 0;
   }*/
 
-  using sample_rate_t = double;
-/*
+  using sample_rate_t = unsigned int;
+
   sample_rate_t get_sample_rate() const noexcept {
-    AudioObjectPropertyAddress pa = {
-      kAudioDevicePropertyNominalSampleRate,
-      kAudioObjectPropertyScopeGlobal,
-      kAudioObjectPropertyElementMaster
-    };
+    __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
+    __snd_pcm_t_raai pcm = _device_id.get_pcm();
 
-    uint32_t data_size = 0;
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyDataSize(
-      _device_id, &pa, 0, nullptr, &data_size)))
+    sample_rate_t rate = 44100;
+    int direction = SND_PCM_STREAM_PLAYBACK;
+
+    if (!__alsa_util::check_error(snd_pcm_hw_params_any(pcm.get(), hw_params.get())))
       return {};
 
-    if (data_size != sizeof(double))
+    if (!__alsa_util::check_error(snd_pcm_hw_params_set_rate_near(pcm.get(), hw_params.get(), &rate, &direction)))
       return {};
 
-    double sample_rate = 0;
-
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyData(
-      _device_id, &pa, 0, nullptr, &data_size, &sample_rate)))
+    if (!__alsa_util::check_error(snd_pcm_hw_params (pcm.get(), hw_params.get())))
       return {};
 
-    return sample_rate;
+    if (!__alsa_util::check_error(snd_pcm_hw_params_get_rate(hw_params.get(), &rate, &direction)))
+      return {};
+
+    return rate;
   }
-
+/*
   bool set_sample_rate(sample_rate_t new_sample_rate) {
     AudioObjectPropertyAddress pa = {
       kAudioDevicePropertyNominalSampleRate,
