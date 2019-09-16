@@ -8,6 +8,10 @@ project(libstdaudio)
 
 set(CMAKE_CXX_STANDARD 17)
 
+if (UNIX AND NOT APPLE)
+	set(LINUX 1)
+endif()
+
 if (MSVC)
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4 /WX")
 else ()
@@ -17,6 +21,11 @@ endif ()
 if (APPLE)
     set(CMAKE_EXE_LINKER_FLAGS "-framework CoreAudio")
 endif ()
+
+if (LINUX)
+	set(CMAKE_EXE_LINKER_FLAGS "-lasound")
+endif ()
+
 
 include_directories(include)
 

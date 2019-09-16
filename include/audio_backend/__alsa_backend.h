@@ -10,20 +10,32 @@
 #include <iostream>
 #include <vector>
 #include <functional>
+#include <memory>
 #include <forward_list>
 #include <map>
 #include <alsa/asoundlib.h>
 
 _LIBSTDAUDIO_NAMESPACE_BEGIN
 
+// -----------------------------------------------------------------------------
+struct __snd_ctl_close {
+  void operator()(snd_ctl_t* p) {
+    snd_ctl_close(p);
+  }
+};
+using __snd_ctl_t_raai = std::unique_ptr<snd_ctl_t, __snd_ctl_close>;
+
+// -----------------------------------------------------------------------------
+
+
 // TODO: make __coreaudio_sample_type flexible according to the recommendation (see AudioSampleType).
 using __coreaudio_native_sample_type = float;
-/*
-struct __coreaudio_stream_config {
-  AudioBufferList input_config = {0};
-  AudioBufferList output_config = {0};
+
+struct __alsa_stream_config {
+//  AudioBufferList input_config = {0};
+//  AudioBufferList output_config = {0};
 };
-*/
+
 /*
 class __coreaudio_util {
 public:
@@ -66,11 +78,13 @@ struct audio_device_exception : public runtime_error {
   }
 };
 
-struct __audio_device_id
+struct __alsa_audio_device_id
 {
   int card_id {-1};
   int device_id {-1};
 };
+
+using __audio_device_id = __alsa_audio_device_id;
 
 class audio_device {
 public:
@@ -84,7 +98,7 @@ public:
     return _name;
   }
 
-  using device_id_t = __audio_device_id;
+  using device_id_t = __alsa_audio_device_id;
 /*
   device_id_t device_id() const noexcept {
     return _device_id;
@@ -92,12 +106,12 @@ public:
 
   bool is_input() const noexcept {
     return _config.input_config.mNumberBuffers == 1;
-  }
+  }*/
 
   bool is_output() const noexcept {
-    return _config.output_config.mNumberBuffers == 1;
+    return true; //TODO fix _config.output_config.mNumberBuffers == 1;
   }
-
+/*
   int get_num_input_channels() const noexcept {
     return is_input() ? _config.input_config.mBuffers[0].mNumberChannels : 0;
   }
@@ -272,19 +286,19 @@ public:
 
 private:
   friend class __audio_device_enumerator;
-/*
-  audio_device(device_id_t device_id, string name, __coreaudio_stream_config config)
+
+  audio_device(device_id_t device_id, string name, __alsa_stream_config config)
   : _device_id(device_id),
     _name(move(name)),
     _config(config) {
-    assert(!_name.empty());
-    assert(config.input_config.mNumberBuffers == 0 || config.input_config.mNumberBuffers == 1);
-    assert(config.output_config.mNumberBuffers == 0 || config.output_config.mNumberBuffers == 1);
+//    assert(!_name.empty());
+//    assert(config.input_config.mNumberBuffers == 0 || config.input_config.mNumberBuffers == 1);
+//    assert(config.output_config.mNumberBuffers == 0 || config.output_config.mNumberBuffers == 1);
 
-    _init_supported_sample_rates();
-    _init_supported_buffer_sizes();
+//    _init_supported_sample_rates();
+//    _init_supported_buffer_sizes();
   }
-*//*
+/*
   static OSStatus _device_callback(AudioObjectID device_id,
                                    const AudioTimeStamp* &* now *&*/ /*,
                                    const AudioBufferList* input_data,
@@ -401,11 +415,11 @@ private:
     assert(_max_supported_buffer_size >= _min_supported_buffer_size);
   }
 */
-//  AudioObjectID _device_id = {};
+  __alsa_audio_device_id _device_id = {};
 //  AudioDeviceIOProcID _proc_id = {};
   bool _running = false;
   string _name = {};
-//  __coreaudio_stream_config _config;
+  __alsa_stream_config _config;
   vector<sample_rate_t> _supported_sample_rates = {};
   buffer_size_t _min_supported_buffer_size = 0;
   buffer_size_t _max_supported_buffer_size = 0;
@@ -445,13 +459,13 @@ public:
   template <typename Condition>
   auto get_device_list(Condition condition) {
     audio_device_list devices;
-    /*const auto device_ids = get_device_ids();
+    const auto device_ids = get_device_ids();
 
     for (const auto device_id : device_ids) {
       auto device_from_id = get_device(device_id);
       if (condition(device_from_id))
         devices.push_front(move(device_from_id));
-    }*/
+    }
 
     return devices;
   }
@@ -461,77 +475,85 @@ public:
       return d.is_input();
     });
   }
-
+*/
   auto get_output_device_list() {
     return get_device_list([](const audio_device& d){
       return d.is_output();
     });
   }
-*/
+
 private:
   __audio_device_enumerator() = default;
-/*
-  static vector<AudioDeviceID> get_device_ids() {
-    AudioObjectPropertyAddress pa = {
-      kAudioHardwarePropertyDevices,
-      kAudioObjectPropertyScopeGlobal,
-      kAudioObjectPropertyElementMaster
-    };
 
-    uint32_t data_size = 0;
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyDataSize(
-      kAudioObjectSystemObject, &pa,
-      0, nullptr, &data_size)))
-      return {};
+  constexpr static inline size_t __max_id_length = 8;
+  static vector<__alsa_audio_device_id> get_device_ids() {
 
-    const auto device_count = static_cast<uint32_t>(data_size / sizeof(AudioDeviceID));
-    if (device_count == 0)
-      return {};
+    vector<__alsa_audio_device_id> device_ids;
 
-    vector<AudioDeviceID> device_ids(device_count);
+    int card_index = -1;
 
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyData(
-      kAudioObjectSystemObject, &pa,
-      0, nullptr, &data_size, device_ids.data())))
-      return {};
+    while (true) {
+      int result = snd_card_next(&card_index);
+      if (result < 0 || card_index < 0)
+        break;
+
+      // TODO handle buffer size not large enough (?over 1000 devices)
+      char name_buffer[__max_id_length];
+      snprintf(name_buffer, __max_id_length, "hw:%d", card_index);
+
+      snd_ctl_t *raw_handle;
+      result = snd_ctl_open(&raw_handle, name_buffer, 0);
+      __snd_ctl_t_raai snd_ctl_handle(raw_handle);
+      if (result < 0 || !raw_handle)
+        continue;
+
+      int device_index = -1;
+      while (true) {
+        result = snd_ctl_pcm_next_device(raw_handle, &device_index);
+        if (result < 0 || device_index < 0)
+          break;
+
+        device_ids.push_back({card_index, device_index});
+      }
+    }
 
     return device_ids;
   }
-*//*
-  static audio_device get_device(AudioDeviceID device_id) {
+
+  static audio_device get_device(__alsa_audio_device_id device_id) {
     string name = get_device_name(device_id);
     auto config = get_device_io_stream_config(device_id);
 
     return {device_id, move(name), config};
   }
 
-  static string get_device_name(AudioDeviceID device_id) {
-    AudioObjectPropertyAddress pa = {
+  static string get_device_name(__alsa_audio_device_id device_id) {
+    /*AudioObjectPropertyAddress pa = {
       kAudioDevicePropertyDeviceName,
       kAudioObjectPropertyScopeGlobal,
       kAudioObjectPropertyElementMaster
     };
-
-    uint32_t data_size = 0;
+    */
+    uint32_t data_size = 1; /*
     if (!__coreaudio_util::check_error(AudioObjectGetPropertyDataSize(
       device_id, &pa, 0, nullptr, &data_size)))
-      return {};
+      return {};*/
 
     char name_buffer[data_size];
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyData(
+    /*if (!__coreaudio_util::check_error(AudioObjectGetPropertyData(
       device_id, &pa, 0, nullptr, &data_size, name_buffer)))
-      return {};
+      return {};*/
 
     return name_buffer;
   }
-*/ /*
-  static __coreaudio_stream_config get_device_io_stream_config(AudioDeviceID device_id) {
+
+  static __alsa_stream_config get_device_io_stream_config(__alsa_audio_device_id device_id) {
     return {
-      get_device_stream_config(device_id, kAudioDevicePropertyScopeInput),
-      get_device_stream_config(device_id, kAudioDevicePropertyScopeOutput)
+      //get_device_stream_config(device_id, kAudioDevicePropertyScopeInput),
+      //get_device_stream_config(device_id, kAudioDevicePropertyScopeOutput)
     };
   }
-
+/*
   static AudioBufferList get_device_stream_config(AudioDeviceID device_id, AudioObjectPropertyScope scope) {
     AudioObjectPropertyAddress pa = {
       kAudioDevicePropertyStreamConfiguration,
@@ -570,11 +592,11 @@ optional<audio_device> get_default_audio_output_device() {
 audio_device_list get_audio_input_device_list() {
   return __audio_device_enumerator::get_instance().get_input_device_list();
 }
-
+*/
 audio_device_list get_audio_output_device_list() {
   return __audio_device_enumerator::get_instance().get_output_device_list();
 }
-*/ /*
+ /*
 struct __coreaudio_device_config_listener {
   static void register_callback(audio_device_list_event event, function<void()> cb) {
     static __coreaudio_device_config_listener dcl;
