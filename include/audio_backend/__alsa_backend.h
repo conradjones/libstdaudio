@@ -23,7 +23,22 @@ struct __snd_ctl_close {
     snd_ctl_close(p);
   }
 };
-using __snd_ctl_t_raai = std::unique_ptr<snd_ctl_t, __snd_ctl_close>;
+using __snd_ctl_t_raai = unique_ptr<snd_ctl_t, __snd_ctl_close>;
+
+struct __snd_ctl_card_info_free {
+  void operator()(snd_ctl_card_info_t* ptr) {
+    snd_ctl_card_info_free(ptr);
+  }
+};
+using __snd_ctl_card_info_raai = unique_ptr<snd_ctl_card_info_t, __snd_ctl_card_info_free>;
+
+struct __snd_pcm_info_free {
+  void operator()(snd_pcm_info_t* pcmInfo) {
+    snd_pcm_info_free(pcmInfo);
+  }
+};
+
+using __snd_pcm_info_t_raai = unique_ptr<snd_pcm_info_t, __snd_pcm_info_free>;
 
 // -----------------------------------------------------------------------------
 
@@ -82,6 +97,69 @@ struct __alsa_audio_device_id
 {
   int card_id {-1};
   int device_id {-1};
+
+  string get_card_str_id() {
+    return string("hw:") + to_string(card_id);
+  }
+
+  __snd_ctl_card_info_raai get_card_info() {
+    __snd_ctl_t_raai snd_ctl_handle = card_handle();
+    snd_ctl_card_info_t* card_info_raw = {nullptr};
+
+    snd_ctl_card_info_malloc(&card_info_raw);
+    return __snd_ctl_card_info_raai(card_info_raw);
+  }
+
+  __snd_pcm_info_t_raai get_pcm_info() {
+    snd_pcm_info_t* pcm_info_raw = {nullptr};
+    snd_pcm_info_malloc(&pcm_info_raw);
+
+    if (pcm_info_raw) {
+      snd_pcm_info_set_device(pcm_info_raw, device_id);
+      snd_pcm_info_set_subdevice(pcm_info_raw, 0);
+    }
+
+    return __snd_pcm_info_t_raai(pcm_info_raw);
+  }
+
+  string get_card_name(__snd_ctl_t_raai& snd_ctl_handle) {
+    __snd_ctl_card_info_raai card_info = get_card_info();
+    if (!card_info)
+      return string();
+
+    int result = snd_ctl_card_info(snd_ctl_handle.get(), card_info.get());
+    if (result < 0)
+      return string();
+
+    string card_name = snd_ctl_card_info_get_name(card_info.get());
+    return card_name;
+  }
+
+  string get_device_name() {
+    __snd_ctl_t_raai snd_ctl_handle = card_handle();
+
+    __snd_pcm_info_t_raai pcm_info = get_pcm_info();
+    int result = snd_ctl_pcm_info(snd_ctl_handle.get(), pcm_info.get());
+    if (result < 0)
+      return string();
+
+    string card_name = get_card_name(snd_ctl_handle);
+
+    const char * pcm_name = snd_pcm_info_get_name(pcm_info.get());
+    if (!pcm_name)
+      return string();
+
+    return card_name + " " + pcm_name;
+  }
+
+  __snd_ctl_t_raai card_handle() {
+    snd_ctl_t *raw_handle;
+    int result = snd_ctl_open(&raw_handle, get_card_str_id().c_str(), 0);
+    if (result < 0)
+      return nullptr;
+
+    return __snd_ctl_t_raai(raw_handle);
+  }
 };
 
 using __audio_device_id = __alsa_audio_device_id;
@@ -485,35 +563,27 @@ public:
 private:
   __audio_device_enumerator() = default;
 
-  constexpr static inline size_t __max_id_length = 8;
   static vector<__alsa_audio_device_id> get_device_ids() {
 
     vector<__alsa_audio_device_id> device_ids;
 
-    int card_index = -1;
-
+    __alsa_audio_device_id device_id;
     while (true) {
-      int result = snd_card_next(&card_index);
-      if (result < 0 || card_index < 0)
+
+      int result = snd_card_next(&device_id.card_id);
+      if (result < 0 || device_id.card_id < 0)
         break;
 
-      // TODO handle buffer size not large enough (?over 1000 devices)
-      char name_buffer[__max_id_length];
-      snprintf(name_buffer, __max_id_length, "hw:%d", card_index);
-
-      snd_ctl_t *raw_handle;
-      result = snd_ctl_open(&raw_handle, name_buffer, 0);
-      __snd_ctl_t_raai snd_ctl_handle(raw_handle);
-      if (result < 0 || !raw_handle)
+      __snd_ctl_t_raai snd_ctl_handle = device_id.card_handle();
+      if (!snd_ctl_handle)
         continue;
 
-      int device_index = -1;
       while (true) {
-        result = snd_ctl_pcm_next_device(raw_handle, &device_index);
-        if (result < 0 || device_index < 0)
+        result = snd_ctl_pcm_next_device(snd_ctl_handle.get(), &device_id.device_id);
+        if (result < 0 || device_id.device_id < 0)
           break;
 
-        device_ids.push_back({card_index, device_index});
+        device_ids.push_back(device_id);
       }
     }
 
@@ -528,23 +598,7 @@ private:
   }
 
   static string get_device_name(__alsa_audio_device_id device_id) {
-    /*AudioObjectPropertyAddress pa = {
-      kAudioDevicePropertyDeviceName,
-      kAudioObjectPropertyScopeGlobal,
-      kAudioObjectPropertyElementMaster
-    };
-    */
-    uint32_t data_size = 1; /*
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyDataSize(
-      device_id, &pa, 0, nullptr, &data_size)))
-      return {};*/
-
-    char name_buffer[data_size];
-    /*if (!__coreaudio_util::check_error(AudioObjectGetPropertyData(
-      device_id, &pa, 0, nullptr, &data_size, name_buffer)))
-      return {};*/
-
-    return name_buffer;
+    return device_id.get_device_name();
   }
 
   static __alsa_stream_config get_device_io_stream_config(__alsa_audio_device_id device_id) {
