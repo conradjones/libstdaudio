@@ -13,6 +13,8 @@
 #include <memory>
 #include <forward_list>
 #include <map>
+#include <atomic>
+#include <thread>
 #include <alsa/asoundlib.h>
 
 _LIBSTDAUDIO_NAMESPACE_BEGIN
@@ -219,9 +221,17 @@ using __audio_device_id = __alsa_audio_device_id;
 class audio_device {
 public:
   audio_device() = delete;
+  audio_device(const audio_device&) = delete;
+  audio_device& operator=(const audio_device&) = delete;
+  audio_device(audio_device&& other)
+      : _processing_thread(move(other._processing_thread)) {}
+  audio_device& operator=(audio_device&& other) noexcept {
+    _processing_thread = move(other._processing_thread);
+    return *this;
+  }
 
   ~audio_device() {
-//    stop();
+    stop();
   }
 
   string_view name() const noexcept {
@@ -241,14 +251,14 @@ public:
   bool is_output() const noexcept {
     return true; //TODO fix _config.output_config.mNumberBuffers == 1;
   }
-/*
+
   int get_num_input_channels() const noexcept {
-    return is_input() ? _config.input_config.mBuffers[0].mNumberChannels : 0;
+    return is_input() ? _config.input_config : 0;
   }
 
   int get_num_output_channels() const noexcept {
-    return is_output() ? _config.output_config.mBuffers[0].mNumberChannels : 0;
-  }*/
+    return is_output() ? _config.output_config : 0;
+  }
 
   using sample_rate_t = unsigned int;
 
@@ -345,7 +355,7 @@ public:
 
   // TODO: remove std::function as soon as C++20 default-ctable lambda and lambda in unevaluated contexts become available
   using no_op_t = std::function<void(audio_device&)>;
-/*
+
   template <typename _StartCallbackType = no_op_t,
             typename _StopCallbackType = no_op_t,
             // TODO: is_nothrow_invocable_t does not compile, temporarily replaced with is_invocable_t
@@ -354,42 +364,27 @@ public:
              _StopCallbackType&& stop_callback = [](audio_device&) noexcept {}) {
     if (!_running) {
       // TODO: ProcID is a resource; wrap it into an RAII guard
-      if (!__coreaudio_util::check_error(AudioDeviceCreateIOProcID(
-          _device_id, _device_callback, this, &_proc_id)))
-        return false;
 
-      if (!__coreaudio_util::check_error(AudioDeviceStart(
-          _device_id, _device_callback))) {
-        __coreaudio_util::check_error(AudioDeviceDestroyIOProcID(
-          _device_id, _proc_id));
 
-        _proc_id = {};
-        return false;
-      }
 
       _running = true;
     }
 
     return true;
   }
-*//*
+
   bool stop() {
     if (_running) {
-      if (!__coreaudio_util::check_error(AudioDeviceStop(
-        _device_id, _device_callback)))
-        return false;
-
-      if (!__coreaudio_util::check_error(AudioDeviceDestroyIOProcID(
-        _device_id, _proc_id)))
-        return false;
-
-      _proc_id = {};
       _running = false;
+
+      if (_processing_thread.joinable())
+        _processing_thread.join();
+
     }
 
     return true;
   }
-*/
+
   bool is_running() const noexcept  {
     return _running;
   }
@@ -540,7 +535,8 @@ private:
 */
   __alsa_audio_device_id _device_id = {};
 //  AudioDeviceIOProcID _proc_id = {};
-  bool _running = false;
+  thread _processing_thread;
+  atomic<bool> _running = false;
   string _name = {};
   __alsa_stream_config _config;
   vector<sample_rate_t> _supported_sample_rates = {};
@@ -583,7 +579,8 @@ public:
           return device_id.get_device_name() == desc;
         });
         if (device_id_iterator != end(device_ids)) {
-          return get_device(*device_id_iterator);
+          return nullopt;
+          //          return get_device(*device_id_iterator);
         }
       }
     }
@@ -659,7 +656,7 @@ private:
 
   static __alsa_stream_config get_device_io_stream_config(__alsa_audio_device_id device_id) {
     return {
-      //get_device_stream_config(device_id, SND_PCM_STREAM_CAPTURE),
+      get_device_stream_config(device_id, SND_PCM_STREAM_CAPTURE),
       get_device_stream_config(device_id, SND_PCM_STREAM_PLAYBACK)
     };
   }
@@ -678,9 +675,8 @@ private:
 };
 
 optional<audio_device> get_default_audio_input_device() {
-  return nullopt;
-  //  return __audio_device_enumerator::get_instance().get_default_io_device(
-//    kAudioHardwarePropertyDefaultInputDevice);
+  return __audio_device_enumerator::get_instance().get_default_io_device(
+      SND_PCM_STREAM_CAPTURE);
 }
 
 optional<audio_device> get_default_audio_output_device() {
