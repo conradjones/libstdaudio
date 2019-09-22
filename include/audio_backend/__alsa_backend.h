@@ -1,5 +1,5 @@
 // libstdaudio
-// Copyright (c) 2018 - Timur Doumler
+// Copyright (c) 2019 - Conrad Jones
 // Distributed under the Boost Software License, Version 1.0.
 // (See accompanying file LICENSE.md or copy at http://boost.org/LICENSE_1_0.txt)
 
@@ -235,6 +235,8 @@ public:
       , _device_pcm(move(other._device_pcm))
       , _hw_params(move(other._hw_params))
       , _name(move(other._name))
+      , _sample_rate(other._sample_rate)
+      , _config(other._config)
       {}
   audio_device& operator=(audio_device&& other) noexcept {
     _processing_thread = move(other._processing_thread);
@@ -242,6 +244,8 @@ public:
     _device_pcm = move(other._device_pcm);
     _hw_params = move(other._hw_params);
     _name = move(other._name);
+    _sample_rate = other._sample_rate;
+    _config = other._config;
     return *this;
   }
 
@@ -260,19 +264,19 @@ public:
   }
 
   bool is_input() const noexcept {
-    return false;
+    return get_num_input_channels() > 0;
   }
 
   bool is_output() const noexcept {
-    return true; //TODO fix _config.output_config.mNumberBuffers == 1;
+    return get_num_output_channels() > 0;
   }
 
   int get_num_input_channels() const noexcept {
-    return is_input() ? _config.input_config : 0;
+    return _config.input_config;
   }
 
   int get_num_output_channels() const noexcept {
-    return is_output() ? _config.output_config : 0;
+    return _config.output_config;
   }
 
   using sample_rate_t = unsigned int;
@@ -379,7 +383,29 @@ public:
   bool start(_StartCallbackType&& start_callback = [](audio_device&) noexcept {},
              _StopCallbackType&& stop_callback = [](audio_device&) noexcept {}) {
     if (!_running) {
-      // TODO: ProcID is a resource; wrap it into an RAII guard
+
+      _device_pcm = _device_id.get_pcm();
+      _hw_params = _device_id.get_hw_params();
+
+      __alsa_util::check_error(snd_pcm_hw_params_any(_device_pcm.get(), _hw_params.get()));
+      __alsa_util::check_error(snd_pcm_hw_params_set_rate_resample(_device_pcm.get(), _hw_params.get(), false));
+
+      auto access = [this]() -> std::optional<snd_pcm_access_t> {
+        for (auto access_type : _permited_access_types) {
+          if (0 == snd_pcm_hw_params_set_access(_device_pcm.get(), _hw_params.get(), access_type))
+            return access_type;
+        }
+        return nullopt;
+      }();
+
+      if (!access)
+        return false;
+
+      __alsa_util::check_error(snd_pcm_hw_params_set_channels(_device_pcm.get(), _hw_params.get(), this->_config.output_config));
+      __alsa_util::check_error(snd_pcm_hw_params_set_rate(_device_pcm.get(), _hw_params.get(), _sample_rate, SND_PCM_STREAM_PLAYBACK));
+
+
+      _access_type = access.get();
 
 
 
@@ -440,9 +466,11 @@ private:
     }
   };
 
-  audio_device(device_id_t device_id, string name)
+  audio_device(device_id_t device_id, string name, __alsa_stream_config config)
   : _device_id(device_id),
-    _name(move(name)) {
+    _name(move(name)),
+    _config(config)
+    {
     assert(!_name.empty());
 //    assert(config.input_config.mNumberBuffers == 0 || config.input_config.mNumberBuffers == 1);
 //    assert(config.output_config.mNumberBuffers == 0 || config.output_config.mNumberBuffers == 1);
@@ -454,6 +482,7 @@ private:
 
     _init_supported_sample_rates();
     _init_supported_buffer_sizes();
+    _sample_rate = get_sample_rate();
   }
 /*
   static OSStatus _device_callback(AudioObjectID device_id,
@@ -512,23 +541,31 @@ private:
     return audio_clock_t::time_point() + audio_clock_t::duration(count);
   }*/
 
+  inline static constexpr int _alsa_invalid_parameter = -22;
+
+  inline static constexpr auto _permited_access_types = __array_of<snd_pcm_access_t>(
+      SND_PCM_ACCESS_RW_NONINTERLEAVED,
+      SND_PCM_ACCESS_RW_INTERLEAVED
+  );
+  inline static constexpr auto _test_sample_rates = __array_of<size_t>(
+      44100u,
+      48000u,
+      32000u,
+      96000u,
+      22050u,
+      8000u,
+      4000u,
+      192000u);
+
   void _init_supported_sample_rates() {
-  constexpr auto test_sample_rates = __array_of<size_t>(
-    44100u,
-    48000u,
-    32000u,
-    96000u,
-    22050u,
-    8000u,
-    4000u,
-    192000u);
+
 
     __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
     __snd_pcm_helper pcm(this);
 
     __alsa_util::check_error(snd_pcm_hw_params_any(pcm.get(), hw_params.get()));
 
-    for (auto rate : test_sample_rates) {
+    for (auto rate : _test_sample_rates) {
       int result = snd_pcm_hw_params_test_rate(pcm.get(), hw_params.get(), rate, SND_PCM_STREAM_PLAYBACK);
       if (result == 0)
         _supported_sample_rates.push_back(rate);
@@ -557,6 +594,8 @@ private:
     assert(_max_supported_buffer_size >= _min_supported_buffer_size);
   }
 
+  snd_pcm_access_t _access_type;
+  sample_rate_t _sample_rate;
   __alsa_audio_device_id _device_id = {};
   __snd_pcm_t_raai _device_pcm;
   __snd_pcm_hw_params_raai _hw_params;
@@ -669,33 +708,50 @@ private:
 
   static audio_device get_device(__alsa_audio_device_id device_id) {
     string name = get_device_name(device_id);
-    //auto config = get_device_io_stream_config(device_id);
+    auto config = get_device_io_stream_config(device_id);
 
-    return {device_id, move(name)};
+    return {device_id, move(name), config};
   }
 
   static string get_device_name(__alsa_audio_device_id device_id) {
     return device_id.get_device_name();
   }
 
-  /*static __alsa_stream_config get_device_io_stream_config(__alsa_audio_device_id device_id) {
+  static __alsa_stream_config get_device_io_stream_config(__alsa_audio_device_id device_id) {
     return {
       get_device_stream_config(device_id, SND_PCM_STREAM_CAPTURE),
       get_device_stream_config(device_id, SND_PCM_STREAM_PLAYBACK)
     };
-  }*/
+  }
 
   static int get_device_stream_config(__alsa_audio_device_id device_id, snd_pcm_stream_t streamDirection) {
 
     __snd_pcm_chmap_query_raai chmap_query(snd_pcm_query_chmaps_from_hw(device_id.card_id, device_id.device_id, 0, streamDirection));
-    __snd_pcm_t_raai pcm = device_id.get_pcm();
-    __snd_pcm_chmap_t_raai chmap(snd_pcm_get_chmap(pcm.get()));
-    if (!chmap)
+
+    if (!chmap_query) {
       return 0;
+    }
 
-    std::cout << chmap.get()->channels << "\n";
+    // TODO do better than just matching 2 or 1 channels
+    auto find_chmap = [&chmap_query](int count) -> bool  {
+      auto ** chmap_iterator = chmap_query.get();
+      while (*chmap_iterator != nullptr) {
+        if ((*chmap_iterator)->map.channels == count)
+          return true;
+        ++chmap_iterator;
+      }
+      return false;
+    };
 
-    return chmap.get()->channels;
+    if (find_chmap(2)) {
+      return 2;
+    }
+
+    if (find_chmap(1)) {
+      return 1;
+    }
+
+    return 0;
   }
 };
 
