@@ -87,6 +87,12 @@ using __snd_device_name_hint_raai = unique_ptr<void*, __snd_device_name_hint_fre
 
 // -----------------------------------------------------------------------------
 
+template <typename V, typename... T>
+constexpr auto __array_of(T&&... t)
+-> std::array<V, sizeof...(T)>
+{
+  return { { std::forward<T>(t)... } };
+}
 
 // TODO: make __coreaudio_sample_type flexible according to the recommendation (see AudioSampleType).
 using __coreaudio_native_sample_type = float;
@@ -192,7 +198,7 @@ struct __alsa_audio_device_id
 
   __snd_pcm_t_raai get_pcm() const {
     snd_pcm_t* pcm_t_raw {};
-    int result = snd_pcm_open(&pcm_t_raw, get_device_id_str().c_str(), SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK | SND_PCM_NO_AUTO_RESAMPLE | SND_PCM_NO_AUTO_CHANNELS | SND_PCM_NO_AUTO_FORMAT);
+    __alsa_util::check_error(snd_pcm_open(&pcm_t_raw, get_device_id_str().c_str(), SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK | SND_PCM_NO_AUTO_RESAMPLE | SND_PCM_NO_AUTO_CHANNELS | SND_PCM_NO_AUTO_FORMAT));
     return __snd_pcm_t_raai(pcm_t_raw);
   }
 
@@ -224,9 +230,18 @@ public:
   audio_device(const audio_device&) = delete;
   audio_device& operator=(const audio_device&) = delete;
   audio_device(audio_device&& other)
-      : _processing_thread(move(other._processing_thread)) {}
+      : _processing_thread(move(other._processing_thread))
+      , _device_id(other._device_id)
+      , _device_pcm(move(other._device_pcm))
+      , _hw_params(move(other._hw_params))
+      , _name(move(other._name))
+      {}
   audio_device& operator=(audio_device&& other) noexcept {
     _processing_thread = move(other._processing_thread);
+    _device_id = move(other._device_id);
+    _device_pcm = move(other._device_pcm);
+    _hw_params = move(other._hw_params);
+    _name = move(other._name);
     return *this;
   }
 
@@ -264,7 +279,8 @@ public:
 
   sample_rate_t get_sample_rate() const noexcept {
     __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
-    __snd_pcm_t_raai pcm = _device_id.get_pcm();
+
+    __snd_pcm_helper pcm(this);
 
     sample_rate_t rate = 44100;
     int direction = SND_PCM_STREAM_PLAYBACK;
@@ -300,7 +316,7 @@ public:
   buffer_size_t get_buffer_size_frames() const noexcept {
 
     __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
-    __snd_pcm_t_raai pcm = _device_id.get_pcm();
+    __snd_pcm_helper pcm(this);
 
     if (!__alsa_util::check_error(snd_pcm_hw_params_any(pcm.get(), hw_params.get())))
       return {};
@@ -405,13 +421,36 @@ public:
 private:
   friend class __audio_device_enumerator;
 
-  audio_device(device_id_t device_id, string name, __alsa_stream_config config)
+  struct __snd_pcm_helper {
+    __snd_pcm_helper(const audio_device * device)
+    {
+      if (!device->_device_pcm) {
+        snd_pcm_raai = device->device_id().get_pcm();
+        pcm = snd_pcm_raai.get();
+      } else {
+        pcm = device->_device_pcm.get();
+      }
+    }
+
+    __snd_pcm_t_raai snd_pcm_raai;
+    snd_pcm_t * pcm;
+
+    snd_pcm_t * get() {
+      return pcm;
+    }
+  };
+
+  audio_device(device_id_t device_id, string name)
   : _device_id(device_id),
-    _name(move(name)),
-    _config(config) {
+    _name(move(name)) {
     assert(!_name.empty());
 //    assert(config.input_config.mNumberBuffers == 0 || config.input_config.mNumberBuffers == 1);
 //    assert(config.output_config.mNumberBuffers == 0 || config.output_config.mNumberBuffers == 1);
+
+    //_device_pcm = _device_id.get_pcm();
+    //_hw_params = _device_id.get_hw_params();
+
+    // TODO : QUERY CHANNEL MAP HERE
 
 //    _init_supported_sample_rates();
 //    _init_supported_buffer_sizes();
@@ -457,8 +496,8 @@ private:
       buffers.output_time = coreaudio_timestamp_to_timepoint (output_time);
     }
   }
-*/ /*
-  static audio_buffer<__coreaudio_native_sample_type> coreaudio_buffer_to_buffer(const AudioBuffer& ca_buffer) {
+*/
+/*  static audio_buffer<__coreaudio_native_sample_type> coreaudio_buffer_to_buffer(const AudioBuffer& ca_buffer) {
     // TODO: allow different sample types here! It will possibly be int16_t instead of float on iOS!
 
     auto* data_ptr = reinterpret_cast<__coreaudio_native_sample_type*>(ca_buffer.mData);
@@ -471,34 +510,31 @@ private:
   static audio_clock_t::time_point coreaudio_timestamp_to_timepoint(const AudioTimeStamp* timestamp) {
     auto count = static_cast<audio_clock_t::rep>(timestamp->mHostTime);
     return audio_clock_t::time_point() + audio_clock_t::duration(count);
-  }
+  }*/
 
   void _init_supported_sample_rates() {
-    AudioObjectPropertyAddress pa = {
-      kAudioDevicePropertyAvailableNominalSampleRates,
-      kAudioObjectPropertyScopeGlobal,
-      kAudioObjectPropertyElementMaster
-    };
+  constexpr auto test_sample_rates = __array_of<size_t>(
+    44100u,
+    48000u,
+    32000u,
+    96000u,
+    22050u,
+    8000u,
+    4000u,
+    192000u);
 
-    uint32_t data_size = 0;
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyDataSize(
-      _device_id, &pa, 0, nullptr, &data_size)))
-      return;
+    __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
+    __snd_pcm_helper pcm(this);
 
-    const size_t num_values = data_size / sizeof(AudioValueRange);
-    AudioValueRange values[num_values];
+    __alsa_util::check_error(snd_pcm_hw_params_any(pcm.get(), hw_params.get()));
 
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyData(
-      _device_id, &pa, 0, nullptr, &data_size, &values)))
-      return;
-
-    _supported_sample_rates.reserve(num_values);
-    for (size_t i = 0; i < num_values; ++i) {
-      assert(values[i].mMinimum == values[i].mMaximum);
-      _supported_sample_rates.push_back(values[i].mMinimum);
+    for (auto rate : test_sample_rates) {
+      int result = snd_pcm_hw_params_test_rate(pcm.get(), hw_params.get(), rate, SND_PCM_STREAM_PLAYBACK);
+      if (result == 0)
+        _supported_sample_rates.push_back(rate);
     }
   }
-*//*
+/*
   void _init_supported_buffer_sizes() {
     AudioObjectPropertyAddress pa = {
       kAudioDevicePropertyBufferFrameSizeRange,
@@ -534,7 +570,8 @@ private:
   }
 */
   __alsa_audio_device_id _device_id = {};
-//  AudioDeviceIOProcID _proc_id = {};
+  __snd_pcm_t_raai _device_pcm;
+  __snd_pcm_hw_params_raai _hw_params;
   thread _processing_thread;
   atomic<bool> _running = false;
   string _name = {};
@@ -579,8 +616,7 @@ public:
           return device_id.get_device_name() == desc;
         });
         if (device_id_iterator != end(device_ids)) {
-          return nullopt;
-          //          return get_device(*device_id_iterator);
+          return get_device(*device_id_iterator);
         }
       }
     }
@@ -645,24 +681,25 @@ private:
 
   static audio_device get_device(__alsa_audio_device_id device_id) {
     string name = get_device_name(device_id);
-    auto config = get_device_io_stream_config(device_id);
+    //auto config = get_device_io_stream_config(device_id);
 
-    return {device_id, move(name), config};
+    return {device_id, move(name)};
   }
 
   static string get_device_name(__alsa_audio_device_id device_id) {
     return device_id.get_device_name();
   }
 
-  static __alsa_stream_config get_device_io_stream_config(__alsa_audio_device_id device_id) {
+  /*static __alsa_stream_config get_device_io_stream_config(__alsa_audio_device_id device_id) {
     return {
       get_device_stream_config(device_id, SND_PCM_STREAM_CAPTURE),
       get_device_stream_config(device_id, SND_PCM_STREAM_PLAYBACK)
     };
-  }
+  }*/
 
   static int get_device_stream_config(__alsa_audio_device_id device_id, snd_pcm_stream_t streamDirection) {
 
+    __snd_pcm_chmap_query_raai chmap_query(snd_pcm_query_chmaps_from_hw(device_id.card_id, device_id.device_id, 0, streamDirection));
     __snd_pcm_t_raai pcm = device_id.get_pcm();
     __snd_pcm_chmap_t_raai chmap(snd_pcm_get_chmap(pcm.get()));
     if (!chmap)
