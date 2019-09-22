@@ -452,8 +452,8 @@ private:
 
     // TODO : QUERY CHANNEL MAP HERE
 
-//    _init_supported_sample_rates();
-//    _init_supported_buffer_sizes();
+    _init_supported_sample_rates();
+    _init_supported_buffer_sizes();
   }
 /*
   static OSStatus _device_callback(AudioObjectID device_id,
@@ -534,41 +534,29 @@ private:
         _supported_sample_rates.push_back(rate);
     }
   }
-/*
+
   void _init_supported_buffer_sizes() {
-    AudioObjectPropertyAddress pa = {
-      kAudioDevicePropertyBufferFrameSizeRange,
-      kAudioObjectPropertyScopeGlobal,
-      kAudioObjectPropertyElementMaster
-    };
 
-    uint32_t data_size = 0;
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyDataSize(
-      _device_id, &pa, 0, nullptr, &data_size)))
-      return;
+    __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
+    __snd_pcm_helper pcm(this);
 
-    if (data_size != sizeof(AudioValueRange)) {
-      assert(false);
-      return;
-    }
+    __alsa_util::check_error(snd_pcm_hw_params_any(pcm.get(), hw_params.get()));
 
-    AudioValueRange buffer_size_range = {};
+    snd_pcm_uframes_t min_frames {};
+    snd_pcm_uframes_t max_frames {};
 
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyData(
-      _device_id, &pa, 0, nullptr, &data_size, &buffer_size_range))) {
-      assert(false);
-      return;
-    }
+    __alsa_util::check_error(snd_pcm_hw_params_get_buffer_size_min(hw_params.get(), &min_frames));
+    __alsa_util::check_error(snd_pcm_hw_params_get_buffer_size_max(hw_params.get(), &max_frames));
 
-    _min_supported_buffer_size = static_cast<buffer_size_t>(buffer_size_range.mMinimum);
-    _max_supported_buffer_size = static_cast<buffer_size_t>(buffer_size_range.mMaximum);
+    _min_supported_buffer_size = static_cast<buffer_size_t>(min_frames);
+    _max_supported_buffer_size = static_cast<buffer_size_t>(max_frames);
 
-    // ensure that the supported buffer size range obtained from CoreAudio makes sense:
+    // ensure that the supported buffer size range obtained from Wasapi makes sense:
     // TODO: do this using proper error handling/reporting instead of asserts
     assert(_min_supported_buffer_size > 0);
     assert(_max_supported_buffer_size >= _min_supported_buffer_size);
   }
-*/
+
   __alsa_audio_device_id _device_id = {};
   __snd_pcm_t_raai _device_pcm;
   __snd_pcm_hw_params_raai _hw_params;
