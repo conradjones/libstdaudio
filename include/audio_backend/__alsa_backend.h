@@ -56,6 +56,32 @@ struct __snd_pcm_t_free {
 
 using __snd_pcm_t_raai = unique_ptr<snd_pcm_t, __snd_pcm_t_free>;
 
+struct __snd_pcm_chmap_query_free {
+  void operator()(snd_pcm_chmap_query_t** ptr) {
+    snd_pcm_free_chmaps(ptr);
+  }
+};
+
+using __snd_pcm_chmap_query_raai = unique_ptr<snd_pcm_chmap_query_t*, __snd_pcm_chmap_query_free>;
+
+struct __snd_pcm_chmap_t_free {
+  void operator()(snd_pcm_chmap_t* ptr) {
+    free(ptr);
+  }
+};
+
+using __snd_pcm_chmap_t_raai = unique_ptr<snd_pcm_chmap_t, __snd_pcm_chmap_t_free>;
+
+
+struct __snd_device_name_hint_free {
+  void operator()(void** ptr)
+  {
+    snd_device_name_free_hint(ptr);
+  }
+};
+
+using __snd_device_name_hint_raai = unique_ptr<void*, __snd_device_name_hint_free>;
+
 
 // -----------------------------------------------------------------------------
 
@@ -64,8 +90,10 @@ using __snd_pcm_t_raai = unique_ptr<snd_pcm_t, __snd_pcm_t_free>;
 using __coreaudio_native_sample_type = float;
 
 struct __alsa_stream_config {
-//  AudioBufferList input_config = {0};
-//  AudioBufferList output_config = {0};
+//  AudioBufferList
+  int input_config = {0};
+//  AudioBufferList
+  int output_config = {0};
 };
 
 
@@ -529,24 +557,35 @@ public:
     static __audio_device_enumerator cde;
     return cde;
   }
-/*
-  optional<audio_device> get_default_io_device(AudioObjectPropertySelector selector) {
-    AudioObjectPropertyAddress pa = {
-      selector,
-      kAudioObjectPropertyScopeGlobal,
-      kAudioObjectPropertyElementMaster
-    };
 
-    AudioDeviceID device_id;
-    uint32_t data_size = sizeof(device_id);
+  optional<audio_device> get_default_io_device(snd_pcm_stream_t direction) {
 
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyData (
-      kAudioObjectSystemObject, &pa, 0, nullptr, &data_size, &device_id)))
-      return {};
+    //TODO ignoring direction
+    auto device_ids = get_device_ids();
 
-    return get_device(device_id);
+    void ** name_hints_raw = {nullptr};
+    snd_device_name_hint(-1, "pcm", &name_hints_raw);
+    __snd_device_name_hint_raai nameHints(name_hints_raw);
+
+    for (void** name_hint_itr = name_hints_raw; *name_hint_itr; ++name_hint_itr) {
+      std::unique_ptr<char> name_raai(snd_device_name_get_hint(*name_hint_itr, "NAME"));
+      std::unique_ptr<char> desc_raai(snd_device_name_get_hint(*name_hint_itr, "DESC"));
+
+      std::string name(name_raai.get());
+      std::string desc(desc_raai.get());
+      desc = desc.substr(0, desc.find('\n'));
+      if (name.rfind("sysdefault:CARD=", 0)) {
+        auto device_id_iterator = find_if(begin(device_ids), end(device_ids), [desc](const auto& device_id){
+          return device_id.get_device_name() == desc;
+        });
+        if (device_id_iterator != end(device_ids)) {
+          return get_device(*device_id_iterator);
+        }
+      }
+    }
+    return nullopt;
   }
-*/
+
   template <typename Condition>
   auto get_device_list(Condition condition) {
     audio_device_list devices;
@@ -616,46 +655,34 @@ private:
 
   static __alsa_stream_config get_device_io_stream_config(__alsa_audio_device_id device_id) {
     return {
-      //get_device_stream_config(device_id, kAudioDevicePropertyScopeInput),
-      //get_device_stream_config(device_id, kAudioDevicePropertyScopeOutput)
+      //get_device_stream_config(device_id, SND_PCM_STREAM_CAPTURE),
+      get_device_stream_config(device_id, SND_PCM_STREAM_PLAYBACK)
     };
   }
-/*
-  static AudioBufferList get_device_stream_config(AudioDeviceID device_id, AudioObjectPropertyScope scope) {
-    AudioObjectPropertyAddress pa = {
-      kAudioDevicePropertyStreamConfiguration,
-      scope,
-      kAudioObjectPropertyElementMaster
-    };
 
-    uint32_t data_size = 0;
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyDataSize(
-      device_id, &pa, 0, nullptr, &data_size)))
-      return {0};
+  static int get_device_stream_config(__alsa_audio_device_id device_id, snd_pcm_stream_t streamDirection) {
 
-    if (data_size != sizeof(AudioBufferList))
-      return {0};
+    __snd_pcm_t_raai pcm = device_id.get_pcm();
+    __snd_pcm_chmap_t_raai chmap(snd_pcm_get_chmap(pcm.get()));
+    if (!chmap)
+      return 0;
 
-    AudioBufferList stream_config;
+    std::cout << chmap.get()->channels << "\n";
 
-    if (!__coreaudio_util::check_error(AudioObjectGetPropertyData(
-      device_id, &pa, 0, nullptr, &data_size, &stream_config)))
-      return {0};
-
-    return stream_config;
-  }*/
+    return chmap.get()->channels;
+  }
 };
 /*
 optional<audio_device> get_default_audio_input_device() {
   return __audio_device_enumerator::get_instance().get_default_io_device(
     kAudioHardwarePropertyDefaultInputDevice);
-}
+}*/
 
 optional<audio_device> get_default_audio_output_device() {
   return __audio_device_enumerator::get_instance().get_default_io_device(
-    kAudioHardwarePropertyDefaultOutputDevice);
+      SND_PCM_STREAM_PLAYBACK);
 }
-
+/*
 audio_device_list get_audio_input_device_list() {
   return __audio_device_enumerator::get_instance().get_input_device_list();
 }
