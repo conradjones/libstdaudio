@@ -185,7 +185,7 @@ struct __alsa_audio_device_id
     if (!pcm_name)
       return string();
 
-    return card_name + " " + pcm_name;
+    return card_name + ", " + pcm_name;
   }
 
   __snd_pcm_t_raai get_pcm() const {
@@ -208,6 +208,10 @@ struct __alsa_audio_device_id
 
     return __snd_ctl_t_raai(raw_handle);
   }
+
+  bool operator==(const __alsa_audio_device_id& rhs) {
+    return device_id == rhs.device_id && card_id == rhs.card_id;
+  }
 };
 
 using __audio_device_id = __alsa_audio_device_id;
@@ -229,10 +233,10 @@ public:
   device_id_t device_id() const noexcept {
     return _device_id;
   }
-/*
+
   bool is_input() const noexcept {
-    return _config.input_config.mNumberBuffers == 1;
-  }*/
+    return false;
+  }
 
   bool is_output() const noexcept {
     return true; //TODO fix _config.output_config.mNumberBuffers == 1;
@@ -410,7 +414,7 @@ private:
   : _device_id(device_id),
     _name(move(name)),
     _config(config) {
-//    assert(!_name.empty());
+    assert(!_name.empty());
 //    assert(config.input_config.mNumberBuffers == 0 || config.input_config.mNumberBuffers == 1);
 //    assert(config.output_config.mNumberBuffers == 0 || config.output_config.mNumberBuffers == 1);
 
@@ -574,7 +578,7 @@ public:
       std::string name(name_raai.get());
       std::string desc(desc_raai.get());
       desc = desc.substr(0, desc.find('\n'));
-      if (name.rfind("sysdefault:CARD=", 0)) {
+      if (name.rfind("sysdefault:CARD=", 0) == 0) {
         auto device_id_iterator = find_if(begin(device_ids), end(device_ids), [desc](const auto& device_id){
           return device_id.get_device_name() == desc;
         });
@@ -599,13 +603,13 @@ public:
 
     return devices;
   }
-/*
+
   auto get_input_device_list() {
     return get_device_list([](const audio_device& d){
       return d.is_input();
     });
   }
-*/
+
   auto get_output_device_list() {
     return get_device_list([](const audio_device& d){
       return d.is_output();
@@ -672,21 +676,22 @@ private:
     return chmap.get()->channels;
   }
 };
-/*
+
 optional<audio_device> get_default_audio_input_device() {
-  return __audio_device_enumerator::get_instance().get_default_io_device(
-    kAudioHardwarePropertyDefaultInputDevice);
-}*/
+  return nullopt;
+  //  return __audio_device_enumerator::get_instance().get_default_io_device(
+//    kAudioHardwarePropertyDefaultInputDevice);
+}
 
 optional<audio_device> get_default_audio_output_device() {
   return __audio_device_enumerator::get_instance().get_default_io_device(
       SND_PCM_STREAM_PLAYBACK);
 }
-/*
+
 audio_device_list get_audio_input_device_list() {
   return __audio_device_enumerator::get_instance().get_input_device_list();
 }
-*/
+
 audio_device_list get_audio_output_device_list() {
   return __audio_device_enumerator::get_instance().get_output_device_list();
 }
