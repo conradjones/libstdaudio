@@ -51,8 +51,8 @@ struct __snd_pcm_hw_params_free {
 using __snd_pcm_hw_params_raai = unique_ptr<snd_pcm_hw_params_t, __snd_pcm_hw_params_free>;
 
 struct __snd_pcm_t_free {
-  void operator()(snd_pcm_t* pcmInfo) {
-    snd_pcm_close(pcmInfo);
+  void operator()(snd_pcm_t* pcm) {
+    snd_pcm_close(pcm);
   }
 };
 
@@ -84,6 +84,52 @@ struct __snd_device_name_hint_free {
 
 using __snd_device_name_hint_raai = unique_ptr<void*, __snd_device_name_hint_free>;
 
+struct __snd_pcm_format_mask_free {
+  void operator()(snd_pcm_format_mask_t* formatMask)
+  {
+    snd_pcm_format_mask_free(formatMask);
+  }
+};
+
+using __snd_pcm_format_mask_raai = unique_ptr<snd_pcm_format_mask_t, __snd_pcm_format_mask_free>;
+
+struct __snd_pcm_chmap_free {
+  void operator()(snd_pcm_chmap_t* p)
+  {
+    free(p);
+  }
+};
+
+using __snd_pcm_chmap_raai = unique_ptr<snd_pcm_chmap_t, __snd_pcm_chmap_free>;
+
+__snd_pcm_chmap_raai __make_snd_pcm_chmap(size_t count)
+{
+  snd_pcm_chmap_t * chmap = static_cast<snd_pcm_chmap_t*>(malloc(sizeof(int) + sizeof(int) * count));
+  chmap->channels = count;
+  //TODO support other channel maps
+  if (count == 2) {
+    chmap->pos[0] = SND_CHMAP_FL;
+    chmap->pos[1] = SND_CHMAP_FR;
+  } else if (count == 1) {
+    chmap->pos[0] = SND_CHMAP_FC;
+  }
+  return __snd_pcm_chmap_raai(chmap);
+}
+
+struct __snd_pcm_sw_params_free {
+  void operator()(snd_pcm_sw_params_t* ptr)
+  {
+    snd_pcm_sw_params_free(ptr);
+  }
+};
+
+using __snd_pcm_sw_params_raai = unique_ptr<snd_pcm_sw_params_t, __snd_pcm_sw_params_free>;
+
+__snd_pcm_sw_params_raai __make_snd_pcm_sw_params() {
+  snd_pcm_sw_params_t *params = nullptr;
+  snd_pcm_sw_params_malloc(&params);
+  return __snd_pcm_sw_params_raai(params);
+}
 
 // -----------------------------------------------------------------------------
 
@@ -95,7 +141,7 @@ constexpr auto __array_of(T&&... t)
 }
 
 // TODO: make __coreaudio_sample_type flexible according to the recommendation (see AudioSampleType).
-using __coreaudio_native_sample_type = float;
+using __coreaudio_native_sample_type = int16_t;
 
 struct __alsa_stream_config {
 //  AudioBufferList
@@ -103,7 +149,6 @@ struct __alsa_stream_config {
 //  AudioBufferList
   int output_config = {0};
 };
-
 
 class __alsa_util {
 public:
@@ -126,6 +171,65 @@ private:
     cerr << "__alsa_backend error: " << s << endl;
   }
 };
+
+class __alsa_pollfd {
+
+private:
+  int _poll_fd_count = {0};
+  std::vector<pollfd> _poll_fd;
+  snd_pcm_t* _pcm;
+
+  friend std::optional<__alsa_pollfd> __make_alsa_pollfd(snd_pcm_t* pcm);
+
+public:
+  __alsa_pollfd() = default;
+
+  int wait()
+  {
+    while (true) {
+      int result = poll(_poll_fd.data(), _poll_fd.size(), -1);
+      if (result < 0) {
+        return -1;
+      }
+      unsigned short revents;
+
+      result = snd_pcm_poll_descriptors_revents(_pcm, _poll_fd.data(), _poll_fd.size() - 1, &revents);
+      if (result < 0) {
+        return -1;
+      }
+      if (revents & (POLLERR | POLLNVAL | POLLHUP)) {
+        return 0;
+      }
+      if (revents & POLLOUT)
+        return 0;
+    }
+  }
+};
+
+std::optional<__alsa_pollfd> __make_alsa_pollfd(snd_pcm_t* pcm) {
+  __alsa_pollfd pollfd;
+
+  pollfd._pcm = pcm;
+  pollfd._poll_fd_count = snd_pcm_poll_descriptors_count(pcm);
+  if (pollfd._poll_fd_count <= 0)
+    return nullopt;
+
+  pollfd._poll_fd.resize(pollfd._poll_fd_count + 1);
+  pollfd._poll_fd[0] = {};
+  pollfd._poll_fd[1] = {};
+
+  int result = snd_pcm_poll_descriptors(pcm, pollfd._poll_fd.data(), pollfd._poll_fd_count);
+  if (result < 0)
+    return nullopt;
+
+  int poll_exit_pipe_fd[2];
+  if (pipe2(poll_exit_pipe_fd, O_NONBLOCK) != 0) {
+    return nullopt;
+  }
+  pollfd._poll_fd[pollfd._poll_fd_count].fd = poll_exit_pipe_fd[0];
+  pollfd._poll_fd[pollfd._poll_fd_count].events = POLLIN;
+  return pollfd;
+}
 
 struct audio_device_exception : public runtime_error {
   explicit audio_device_exception(const char* what)
@@ -230,21 +334,38 @@ public:
   audio_device(const audio_device&) = delete;
   audio_device& operator=(const audio_device&) = delete;
   audio_device(audio_device&& other)
-      : _processing_thread(move(other._processing_thread))
+      : _access_type(other._access_type)
+      , _sample_rate(other._sample_rate)
+      , _audio_format(other._audio_format)
+      , _buffer_size_frames(other._buffer_size_frames)
+      , _poll_fd(move(other._poll_fd))
+      , _supported_sample_rates(move(other._supported_sample_rates))
+      , _supported_audio_formats(move(other._supported_audio_formats))
+      , _min_supported_buffer_size(other._min_supported_buffer_size)
+      , _max_supported_buffer_size(other._max_supported_buffer_size)
       , _device_id(other._device_id)
       , _device_pcm(move(other._device_pcm))
       , _hw_params(move(other._hw_params))
+      , _processing_thread(move(other._processing_thread))
       , _name(move(other._name))
-      , _sample_rate(other._sample_rate)
       , _config(other._config)
-      {}
+  {}
+
   audio_device& operator=(audio_device&& other) noexcept {
-    _processing_thread = move(other._processing_thread);
-    _device_id = move(other._device_id);
+    _access_type = other._access_type;
+    _sample_rate = other._sample_rate;
+    _audio_format = other._audio_format;
+    _buffer_size_frames = other._buffer_size_frames;
+    _poll_fd = move(other._poll_fd);
+    _supported_sample_rates = move(other._supported_sample_rates);
+    _supported_audio_formats = move(other._supported_audio_formats);
+    _min_supported_buffer_size = other._min_supported_buffer_size;
+    _max_supported_buffer_size = other._max_supported_buffer_size;
+    _device_id = other._device_id;
     _device_pcm = move(other._device_pcm);
     _hw_params = move(other._hw_params);
+    _processing_thread = move(other._processing_thread);
     _name = move(other._name);
-    _sample_rate = other._sample_rate;
     _config = other._config;
     return *this;
   }
@@ -282,6 +403,7 @@ public:
   using sample_rate_t = unsigned int;
 
   sample_rate_t get_sample_rate() const noexcept {
+    return _sample_rate;
     __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
 
     __snd_pcm_helper pcm(this);
@@ -290,6 +412,9 @@ public:
     int direction = SND_PCM_STREAM_PLAYBACK;
 
     if (!__alsa_util::check_error(snd_pcm_hw_params_any(pcm.get(), hw_params.get())))
+      return {};
+
+    if (!__alsa_util::check_error( snd_pcm_hw_params_set_rate_resample	(pcm.get(), hw_params.get(), false)))
       return {};
 
     if (!__alsa_util::check_error(snd_pcm_hw_params_set_rate_near(pcm.get(), hw_params.get(), &rate, &direction)))
@@ -315,7 +440,26 @@ public:
       _device_id, &pa, 0, nullptr, sizeof(sample_rate_t), &new_sample_rate));
   }
 */
-  using buffer_size_t = uint32_t;
+  using buffer_size_t = snd_pcm_uframes_t;
+  snd_pcm_format_t get_audio_format() const noexcept {
+
+    if (_device_pcm.get()) {
+      __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
+
+      if (!__alsa_util::check_error(
+              snd_pcm_hw_params_any(_device_pcm.get(), hw_params.get())))
+        return {};
+
+      snd_pcm_format_t format;
+      __alsa_util::check_error(
+          snd_pcm_hw_params_get_format(hw_params.get(), &format));
+
+      return format;
+    }
+
+    return _audio_format;
+  }
+
 
   buffer_size_t get_buffer_size_frames() const noexcept {
 
@@ -335,22 +479,16 @@ public:
 
     return frames;
   }
-/*
+
   bool set_buffer_size_frames(buffer_size_t new_buffer_size) {
-    // TODO: for some reason, the call below succeeds even for nonsensical buffer sizes, so we need to catch this  manually:
+
     if (new_buffer_size < _min_supported_buffer_size || new_buffer_size > _max_supported_buffer_size)
       return false;
 
-    AudioObjectPropertyAddress pa = {
-      kAudioDevicePropertyBufferFrameSize,
-      kAudioObjectPropertyScopeGlobal,
-      kAudioObjectPropertyElementMaster
-    };
-
-    return __coreaudio_util::check_error(AudioObjectSetPropertyData(
-      _device_id, &pa, 0, nullptr, sizeof(buffer_size_t), &new_buffer_size));
+    __alsa_util::check_error(snd_pcm_hw_params_set_buffer_size_near(_device_pcm.get(), _hw_params.get(), &new_buffer_size));
+    __alsa_util::check_error(snd_pcm_hw_params_get_buffer_size(_hw_params.get(), &_buffer_size_frames));
   }
-*/
+
   template <typename _SampleType>
   constexpr bool supports_sample_type() const noexcept {
     return is_same_v<_SampleType, __coreaudio_native_sample_type>;
@@ -387,6 +525,11 @@ public:
       _device_pcm = _device_id.get_pcm();
       _hw_params = _device_id.get_hw_params();
 
+      snd_pcm_uframes_t period_size = 0;
+
+      __snd_pcm_chmap_raai chmap = __make_snd_pcm_chmap(_config.output_config);
+      __snd_pcm_sw_params_raai sw_params  = __make_snd_pcm_sw_params();
+
       __alsa_util::check_error(snd_pcm_hw_params_any(_device_pcm.get(), _hw_params.get()));
       __alsa_util::check_error(snd_pcm_hw_params_set_rate_resample(_device_pcm.get(), _hw_params.get(), false));
 
@@ -401,15 +544,36 @@ public:
       if (!access)
         return false;
 
+      _access_type = access.value();
+
       __alsa_util::check_error(snd_pcm_hw_params_set_channels(_device_pcm.get(), _hw_params.get(), this->_config.output_config));
       __alsa_util::check_error(snd_pcm_hw_params_set_rate(_device_pcm.get(), _hw_params.get(), _sample_rate, SND_PCM_STREAM_PLAYBACK));
+      __alsa_util::check_error(snd_pcm_hw_params_set_format(_device_pcm.get(), _hw_params.get(), _audio_format));
 
 
-      _access_type = access.get();
+      __alsa_util::check_error(snd_pcm_hw_params_set_buffer_size_near(_device_pcm.get(), _hw_params.get(), &_buffer_size_frames));
+      __alsa_util::check_error(snd_pcm_hw_params_get_buffer_size(_hw_params.get(), &_buffer_size_frames));
 
+      __alsa_util::check_error(snd_pcm_hw_params(_device_pcm.get(), _hw_params.get()));
 
+      __alsa_util::check_error(snd_pcm_set_chmap(_device_pcm.get(), chmap.get()));
+
+      __alsa_util::check_error(snd_pcm_hw_params_get_period_size(_hw_params.get(), &period_size, nullptr));
+      __alsa_util::check_error(snd_pcm_sw_params_current(_device_pcm.get(), sw_params.get()));
+      __alsa_util::check_error(snd_pcm_sw_params_set_start_threshold(_device_pcm.get(), sw_params.get(), 0));
+      __alsa_util::check_error(snd_pcm_sw_params_set_avail_min(_device_pcm.get(), sw_params.get(), period_size));
+
+      __alsa_util::check_error(snd_pcm_sw_params(_device_pcm.get(), sw_params.get()));
+
+      auto poll_fd = __make_alsa_pollfd(_device_pcm.get());
+      if (!poll_fd.has_value())
+        return false;
+
+      _poll_fd = std::move(poll_fd.value());
 
       _running = true;
+
+      _processing_thread = std::thread(&audio_device::run_thread, this);
     }
 
     return true;
@@ -482,8 +646,94 @@ private:
 
     _init_supported_sample_rates();
     _init_supported_buffer_sizes();
-    _sample_rate = get_sample_rate();
+    _init_supported_formats();
+    _buffer_size_frames = get_buffer_size_frames();
   }
+
+  void run_thread()
+  {
+    auto recover_xrun = [this](int err)
+    {
+      if (err == -EPIPE) {
+        err = snd_pcm_prepare(_device_pcm.get());
+      } else if (err == -ESTRPIPE) {
+        while ((err = snd_pcm_resume(_device_pcm.get())) == -EAGAIN) {
+          poll(NULL, 0, 1);
+        }
+        if (err < 0)
+          err = snd_pcm_prepare(_device_pcm.get());
+      }
+      return err;
+    };
+
+
+    while (_running) {
+      snd_pcm_state_t state = snd_pcm_state(_device_pcm.get());
+      switch (state) {
+      case SND_PCM_STATE_SETUP: {
+        __alsa_util::check_error(snd_pcm_prepare(_device_pcm.get()));
+        continue;
+      }
+      case SND_PCM_STATE_PREPARED: {
+        snd_pcm_sframes_t avail = snd_pcm_avail(_device_pcm.get());
+        if (avail < 0) {
+          std::cout << "SND_PCM_STATE_PREPARED: avail < 0 :" << avail << std::endl;
+          return;
+        }
+
+        if ((snd_pcm_uframes_t)avail == _buffer_size_frames) {
+          _fill_buffers(avail);
+          continue;
+        }
+
+        __alsa_util::check_error(snd_pcm_start(_device_pcm.get()));
+        continue;
+      }
+      case SND_PCM_STATE_RUNNING:
+      case SND_PCM_STATE_PAUSED: {
+        int result = _poll_fd.wait();
+        if (result < 0) {
+          std::cout << "this->waitForPoll() = " << result << std::endl;
+          return;
+        }
+
+        snd_pcm_sframes_t avail = snd_pcm_avail_update(_device_pcm.get());
+        if (avail < 0) {
+          std::cout << "outstream_xrun_recovery :" << avail << std::endl;
+          if (recover_xrun(avail) < 0) {
+            std::cout << "SND_PCM_STATE_PAUSED|SND_PCM_STATE_RUNNING: avail < 0 :" << avail << std::endl;
+            return;
+          }
+        }
+
+        if (avail > 0) {
+          _fill_buffers(avail);
+        }
+        continue;
+      }
+      case SND_PCM_STATE_XRUN:
+        if (recover_xrun(-EPIPE) < 0) {
+          std::cout << "SND_PCM_STATE_XRUN" << std::endl;
+
+          return;
+        }
+
+        continue;
+      case SND_PCM_STATE_OPEN:
+        std::cout << "SND_PCM_STATE_OPEN" << std::endl;
+        return;
+      case SND_PCM_STATE_DRAINING:
+        std::cout << "SND_PCM_STATE_DRAINING" << std::endl;
+        return;
+      case SND_PCM_STATE_DISCONNECTED:
+        std::cout << "SND_PCM_STATE_DISCONNECTED" << std::endl;
+        return;
+      default:
+        continue;
+      }
+    }
+  }
+
 /*
   static OSStatus _device_callback(AudioObjectID device_id,
                                    const AudioTimeStamp* &* now *&*/ /*,
@@ -500,7 +750,36 @@ private:
     invoke(this_device._user_callback, this_device, this_device._current_buffers);
     return noErr;
   }
-*/ /*
+*/
+  void _fill_buffers(snd_pcm_uframes_t available_frames) {
+    const snd_pcm_channel_area_t *areas;
+    snd_pcm_uframes_t frames = available_frames;
+    snd_pcm_uframes_t offset = 0;
+    __alsa_util::check_error(
+        snd_pcm_mmap_begin(_device_pcm.get(), &areas, &offset, &frames));
+    audio_device_io<int16_t> device_io;
+    if (_access_type == SND_PCM_ACCESS_MMAP_INTERLEAVED) {
+      int16_t* ptr2 = (int16_t *)areas->addr;
+      ptr2 += ( offset * _config.output_config );
+      device_io.output_buffer = audio_buffer<int16_t>(ptr2 , frames,
+                                   _config.output_config,
+                                   contiguous_interleaved);
+
+    } else if (_access_type == SND_PCM_ACCESS_MMAP_NONINTERLEAVED) {
+      int16_t* ptr2 = (int16_t *)areas->addr;
+      ptr2 += ( offset );
+      device_io.output_buffer = audio_buffer<int16_t>((int16_t *)areas->addr, frames,
+                                   _config.output_config,
+                                   contiguous_deinterleaved);
+
+
+    }
+    _user_callback(*this, device_io);
+    snd_pcm_sframes_t committed = snd_pcm_mmap_commit(_device_pcm.get(), offset, frames);
+    assert ( committed == frames );
+  }
+
+                                   /*
   static void _fill_buffers(const AudioBufferList* input_bl,
                             const AudioTimeStamp* input_time,
                             const AudioBufferList* output_bl,
@@ -544,22 +823,50 @@ private:
   inline static constexpr int _alsa_invalid_parameter = -22;
 
   inline static constexpr auto _permited_access_types = __array_of<snd_pcm_access_t>(
-      SND_PCM_ACCESS_RW_NONINTERLEAVED,
-      SND_PCM_ACCESS_RW_INTERLEAVED
+      SND_PCM_ACCESS_MMAP_INTERLEAVED,
+      SND_PCM_ACCESS_MMAP_NONINTERLEAVED
   );
   inline static constexpr auto _test_sample_rates = __array_of<size_t>(
       44100u,
       48000u,
-      32000u,
       96000u,
+      32000u,
       22050u,
       8000u,
       4000u,
       192000u);
 
+  inline static constexpr auto _test_audio_formats = __array_of<snd_pcm_format_t>(
+      SND_PCM_FORMAT_FLOAT_LE,
+      SND_PCM_FORMAT_S16_LE,
+      SND_PCM_FORMAT_S24_LE,
+      SND_PCM_FORMAT_S32_LE,
+      SND_PCM_FORMAT_FLOAT64_LE,
+      SND_PCM_FORMAT_S8
+     );
+
+  void _init_supported_formats() {
+    snd_pcm_format_mask_t* format_mask_raw = nullptr;
+    snd_pcm_format_mask_malloc(&format_mask_raw);
+
+    __snd_pcm_format_mask_raai format_mask(format_mask_raw);
+    __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
+
+    __snd_pcm_helper pcm(this);
+
+    __alsa_util::check_error(snd_pcm_hw_params_any(pcm.get(), hw_params.get()));
+    snd_pcm_hw_params_get_format_mask(hw_params.get(), format_mask.get());
+
+    for (auto test_format : _test_audio_formats) {
+      if (snd_pcm_format_mask_test(format_mask.get(), test_format)) {
+        _supported_audio_formats.push_back(test_format);
+      }
+    }
+
+    if (_supported_audio_formats.size() > 0)
+      _audio_format = _supported_audio_formats[0];
+  }
   void _init_supported_sample_rates() {
-
-
     __snd_pcm_hw_params_raai hw_params = _device_id.get_hw_params();
     __snd_pcm_helper pcm(this);
 
@@ -570,6 +877,9 @@ private:
       if (result == 0)
         _supported_sample_rates.push_back(rate);
     }
+
+    if (_supported_sample_rates.size() > 0)
+      _sample_rate = _supported_sample_rates[0];
   }
 
   void _init_supported_buffer_sizes() {
@@ -594,18 +904,27 @@ private:
     assert(_max_supported_buffer_size >= _min_supported_buffer_size);
   }
 
-  snd_pcm_access_t _access_type;
-  sample_rate_t _sample_rate;
-  __alsa_audio_device_id _device_id = {};
-  __snd_pcm_t_raai _device_pcm;
-  __snd_pcm_hw_params_raai _hw_params;
-  thread _processing_thread;
-  atomic<bool> _running = false;
-  string _name = {};
-  __alsa_stream_config _config;
+  snd_pcm_access_t _access_type {};
+  sample_rate_t _sample_rate {};
+  snd_pcm_format_t _audio_format {};
+  buffer_size_t _buffer_size_frames {};
+  __alsa_pollfd _poll_fd {};
+
   vector<sample_rate_t> _supported_sample_rates = {};
+  vector<snd_pcm_format_t> _supported_audio_formats = {};
   buffer_size_t _min_supported_buffer_size = 0;
   buffer_size_t _max_supported_buffer_size = 0;
+
+  __alsa_audio_device_id _device_id = {};
+
+  __snd_pcm_t_raai _device_pcm;
+  __snd_pcm_hw_params_raai _hw_params;
+
+  thread _processing_thread;
+  atomic<bool> _running = false;
+
+  string _name = {};
+  __alsa_stream_config _config;
 
   using __coreaudio_callback_t = function<void(audio_device&, audio_device_io<__coreaudio_native_sample_type>&)>;
   __coreaudio_callback_t _user_callback;
