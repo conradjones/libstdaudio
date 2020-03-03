@@ -42,4 +42,5 @@ add_executable(test
 if (LINUX)
 	target_link_libraries(print_devices asound pthread)
 	target_link_libraries(sine_wave asound pthread)
+	target_link_libraries(level_meter asound pthread)
 endif ()
