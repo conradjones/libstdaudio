@@ -485,8 +485,10 @@ public:
     if (new_buffer_size < _min_supported_buffer_size || new_buffer_size > _max_supported_buffer_size)
       return false;
 
-    __alsa_util::check_error(snd_pcm_hw_params_set_buffer_size_near(_device_pcm.get(), _hw_params.get(), &new_buffer_size));
-    __alsa_util::check_error(snd_pcm_hw_params_get_buffer_size(_hw_params.get(), &_buffer_size_frames));
+    if (!__alsa_util::check_error(snd_pcm_hw_params_set_buffer_size_near(_device_pcm.get(), _hw_params.get(), &new_buffer_size)) )
+      return false;
+
+    return __alsa_util::check_error(snd_pcm_hw_params_get_buffer_size(_hw_params.get(), &_buffer_size_frames));
   }
 
   template <typename _SampleType>
