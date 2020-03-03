@@ -22,9 +22,7 @@ if (APPLE)
     set(CMAKE_EXE_LINKER_FLAGS "-framework CoreAudio")
 endif ()
 
-if (LINUX)
-	set(CMAKE_EXE_LINKER_FLAGS "-lasound")
-endif ()
+
 
 
 include_directories(include)
@@ -39,3 +37,9 @@ add_executable(test
         test/test_main.cpp
         test/audio_buffer_test.cpp
         test/audio_device_test.cpp)
+
+
+if (LINUX)
+	target_link_libraries(print_devices asound pthread)
+	target_link_libraries(sine_wave asound pthread)
+endif ()
