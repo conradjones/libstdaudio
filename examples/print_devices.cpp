@@ -10,7 +10,7 @@
 using namespace std::experimental;
 
 bool is_default_device(const audio_device& d) {
-/*  if (d.is_input()) {
+  if (d.is_input()) {
     auto default_in = get_default_audio_input_device();
     return default_in.has_value() && d.device_id() == default_in->device_id();
   }
@@ -18,15 +18,14 @@ bool is_default_device(const audio_device& d) {
     auto default_out = get_default_audio_output_device();
     return default_out.has_value() && d.device_id() == default_out->device_id();
   }
-*/
   return false;
 }
 
 void print_device_info(const audio_device& d) {
   std::cout << "- \"" << d.name() << "\", ";
-  //std::cout << "sample rate = " << d.get_sample_rate() << " Hz, ";
-  //std::cout << "buffer size = " << d.get_buffer_size_frames() << " frames, ";
-  //std::cout << (d.is_input() ? d.get_num_input_channels() : d.get_num_output_channels()) << " channels";
+  std::cout << "sample rate = " << d.get_sample_rate() << " Hz, ";
+  std::cout << "buffer size = " << d.get_buffer_size_frames() << " frames, ";
+  std::cout << (d.is_input() ? d.get_num_input_channels() : d.get_num_output_channels()) << " channels";
   std::cout << (is_default_device(d) ? " [DEFAULT DEVICE]\n" : "\n");
 };
 
@@ -41,7 +40,9 @@ void print_all_devices() {
 //  print_device_list(get_audio_input_device_list());
 
   std::cout << "\nOutput devices:\n===============\n";
-//  print_device_list(get_audio_output_device_list());
+  print_device_list(get_audio_output_device_list());
+
+  std::cout << std::endl;
 }
 
 int main() {
@@ -62,6 +63,6 @@ int main() {
     print_all_devices();
   });
 */
-  while(true)
-	std::this_thread::sleep_for(std::chrono::system_clock::duration::max());
+  //while(true)
+//	std::this_thread::sleep_for(std::chrono::system_clock::duration::max());
 }
