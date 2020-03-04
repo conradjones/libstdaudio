@@ -1,3 +1,11 @@
+# Alsa Fork
+
+Note this is a fork of Timur's repository with the basis of an Alsa implementation. 
+
+The alsa implementation is alpha it does play audio but is not feature complete, audio input is not currently supported.
+
+------------------------------------------------------------------------------------------------------------
+
 # libstdaudio
 
 This is an implementation of the standard audio API for C++ proposed in P1386.
